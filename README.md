@@ -105,6 +105,9 @@ Manual Execution
   Retrieve Leases:
     ./ahv_ipam_ddns.sh get_leases
   
+  Show Lease Database:
+    ./ahv_ipam_ddns.sh show_leases
+
   Update DNS:
     ./ahv_ipam_ddns.sh update_ddns
   
@@ -112,7 +115,6 @@ Manual Execution
     ./ahv_ipam_ddns.sh cleanup_leases
 
 Verify Logs
-
 All output is written to /var/log/ahv_ipam.log by default. Check the log for details:
 
 tail -f /var/log/ahv_ipam.log
