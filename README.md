@@ -73,9 +73,9 @@ Step 3: Add Hostname Substitution File (optional)
 Step 4: Save Prism Central Credentials to Vault
 
 Run the following command to store Prism Central credentials in Vault:
-  ./ahv_ipam_ddns.sh save_credentials <prism_central_ip> <username> <password>
+  ./ahv_ipam_ddns.sh save_credentials {prism_central_ip} {username} {password}
 
-Replace <prism_central_ip>, <username>, and <password> with your Prism Central details.
+Replace {prism_central_ip}, {username}, and {password} with your Prism Central details.
 This will store the credentials in Vault at secret/nutanix/prism_central_ip and secret/nutanix/encoded_credentials
 
 Step 5: Create the Database
@@ -121,12 +121,12 @@ tail -f /var/log/ahv_ipam.log
 
 ## Notes and Limitations
 
-Basic VLANs Only: This version supports only Nutanix Basic VLANs. Network Controller VLAN support will be added in a future release.
+<b>Basic VLANs Only</b>: This version supports only Nutanix Basic VLANs. Network Controller VLAN support will be added in a future release.
 Vault Requirement: The script relies on HashiCorp Vault for securely storing secrets. Ensure Vault is set up and accessible.
 Flexibility: While written for a specific use case, the script can be modified to work with other environments and configurations.
 
 Contributing
-Contributions are welcome! If you have suggestions, find a bug, or want to add a feature, feel free to open an issue or submit a pull request.
+Contributions are welcome. If you have suggestions, find a bug, or want to add a feature, feel free to open an issue or submit a pull request.
 
 License
 This project is licensed under the Apache License 2.0. See the LICENSE file for details.
