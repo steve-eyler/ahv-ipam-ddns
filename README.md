@@ -1,7 +1,8 @@
 # ahv-ipam-ddns 
+
 AHV IPAM DDNS Integration
 A Bash script for synchronizing DNS with Nutanix AHV-managed IPAM leases using dynamic DNS updates
-
+ 
 ## Overview
 The AHV IPAM DDNS Integration script provides an automated solution for synchronizing DNS records with Nutanix AHV-managed IPAM leases using secure TSIG-authenticated DDNS updates. Designed for environments relying on Nutanix AHV IPAM, the script dynamically retrieves VM lease data, updates DNS records, and cleans up stale entries to maintain a consistent and accurate DNS state.
 
