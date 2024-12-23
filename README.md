@@ -1,8 +1,9 @@
 # ahv-ipam-ddns 
 
 AHV IPAM DDNS Integration
+
 A Bash script for synchronizing DNS with Nutanix AHV-managed IPAM leases using dynamic DNS updates
- 
+  
 ## Overview
 The AHV IPAM DDNS Integration script provides an automated solution for synchronizing DNS records with Nutanix AHV-managed IPAM leases using secure TSIG-authenticated DDNS updates. Designed for environments relying on Nutanix AHV IPAM, the script dynamically retrieves VM lease data, updates DNS records, and cleans up stale entries to maintain a consistent and accurate DNS state.
 
@@ -51,6 +52,7 @@ Step 1: Clone the Repository
 Step 2: Configure the JSON File
 Edit the ahv_ipam_ddns.json configuration file:
 
+```json
 {
     "dns_ip_address": "10.1.150.101",
     "domain_name": "lab.steveeyler.com",
@@ -61,15 +63,18 @@ Edit the ahv_ipam_ddns.json configuration file:
     "postgres_host": "10.1.150.101",
     "ahv_ipam_db": "ahv_ipam_db"
 }
-
+```
+ 
 Step 3: Add Hostname Substitution File (optional)
   Create a file (default ddns_hostnames.csv) to define preferred hostnames in the format:
+```
     normalized_vm_name,preferred_hostname
     lab-softwaredistribution,lcm
     lab-wireshark,wireshark
     se-saratoga,saratoga
     se-stargazer,stargazer
     se-valiant,valiant
+```
 
 Step 4: Save Prism Central Credentials to Vault
 
@@ -102,6 +107,9 @@ The cron job will:
 
 Manual Execution
   Run individual functions as needed:
+
+  Store Prism Central Credentials:
+    ./ahv_ipam_ddns.sh save_credentials {prism_central_ip} {username} {password}
 
   Retrieve Leases:
     ./ahv_ipam_ddns.sh get_leases
