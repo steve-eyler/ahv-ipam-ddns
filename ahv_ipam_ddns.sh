@@ -1,8 +1,5 @@
 #!/bin/bash
 
-postgres_host="10.1.150.101"
-ahv_ipam_db="ahv_ipam_db"
-
 log_debug() {
     if [[ "$DEBUG_ENABLED" == "true" ]]; then
         echo "[DEBUG] $1"
@@ -227,20 +224,20 @@ get_ipam_vlans() {
 
 show_leases() {
     export PGPASSWORD="$(vault kv get -field=password secret/ipa/psql/ahv_admin)"
-    psql -U ahv_admin -h "$postgres_host" -d "$ahv_ipam_db" -c "SELECT * FROM leases;"
+    psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "SELECT * FROM leases;"
 }
 
 cleanup_leases() {
     echo "Cleaning up stale entries in the database..."
     export PGPASSWORD="$(vault kv get -field=password secret/ipa/psql/ahv_admin)"
-    psql -U ahv_admin -h "$postgres_host" -d "$ahv_ipam_db" -c "
+    psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
         DELETE FROM leases WHERE last_updated < NOW() - INTERVAL '${STALE_ENTRY_TIMEOUT} seconds';
     "
     echo "Stale entries removed."
 }
 
 get_leases() {
-    echo "Starting get_leases..."
+    echo "Starting get_leases with pagination support..."
 
     local prism_central_ip
     local encoded_credentials
@@ -257,116 +254,110 @@ get_leases() {
         return 1
     fi
 
-    echo "Fetching IPAM-managed VLANs..."
-    get_ipam_vlans
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to fetch IPAM-managed VLANs."
-        return 1
-    fi
-
     # Load preferred hostnames from CSV
     declare -A hostname_map
     log_debug "Debug: Loading hostname map from ${HOSTNAME_SUBSTITUTION_FILE}"
 
     while IFS=',' read -r normalized_hostname preferred_hostname || [ -n "$normalized_hostname" ]; do
-        # Skip empty lines or lines missing required fields
         if [[ -z "$normalized_hostname" || -z "$preferred_hostname" ]]; then
             echo "Error: Malformed line in ${HOSTNAME_SUBSTITUTION_FILE}: '$normalized_hostname,$preferred_hostname'. Skipping."
             continue
         fi
-
-        # Log the mapping
-        log_debug "Debug: Mapping $normalized_hostname -> $preferred_hostname"
-
-        # Add to the hostname map
         hostname_map["$normalized_hostname"]="$preferred_hostname"
     done < ${HOSTNAME_SUBSTITUTION_FILE}
 
     log_debug "Debug: Loaded hostname_map keys: ${!hostname_map[*]}"
 
-    echo "Fetching VM lease data from Nutanix Prism Central at $prism_central_ip..."
-    local response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-        "https://$prism_central_ip:9440/api/nutanix/v3/vms/list" \
-        -H "Authorization: Basic $encoded_credentials" \
-        -H "Content-Type: application/json" \
-        -d '{"kind": "vm"}' -k)
+    local offset=0
+    local batch_size=100  # Adjust as necessary
+    local total_matches=1 # Dummy value to enter the loop
 
-    local http_body=$(echo "$response" | sed -e 's/HTTP_STATUS:.*//g')
-    local http_status=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTP_STATUS://')
+    while [ "$offset" -lt "$total_matches" ]; do
+        echo "Fetching VMs with offset $offset..."
 
-    if [ "$http_status" -ne 200 ]; then
-        echo "Error: Failed to fetch VM lease data. HTTP Status: $http_status"
-        echo "HTTP Body: $http_body"
-        return 1
-    fi
+        local response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+            "https://$prism_central_ip:9440/api/nutanix/v3/vms/list" \
+            -H "Authorization: Basic $encoded_credentials" \
+            -H "Content-Type: application/json" \
+            -d "{\"kind\": \"vm\", \"offset\": $offset, \"length\": $batch_size}" -k)
 
-    echo "Parsing VM lease data..."
-    echo "$http_body" | jq -c '.entities[]' | while read -r entity; do
-        local vm_name=$(echo "$entity" | jq -r '.status.name // empty')
-        local nic_list=$(echo "$entity" | jq -c '.status.resources.nic_list[]?')
+        local http_body=$(echo "$response" | sed -e 's/HTTP_STATUS:.*//g')
+        local http_status=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTP_STATUS://')
 
-        echo "$nic_list" | jq -c 'select(.ip_endpoint_list[]?.ip_type == "DHCP")' | while read -r nic; do
-            local ip_address=$(echo "$nic" | jq -r '.ip_endpoint_list[]?.ip // empty')
-            local mac_address=$(echo "$nic" | jq -r '.mac_address // empty')
-            local vlan_uuid=$(echo "$nic" | jq -r '.subnet_reference.uuid // empty')
+        if [ "$http_status" -ne 200 ]; then
+            echo "Error: Failed to fetch VM lease data. HTTP Status: $http_status"
+            echo "HTTP Body: $http_body"
+            return 1
+        fi
 
-            log_debug "Debug: Processing VM $vm_name with IP $ip_address, VLAN UUID $vlan_uuid"
+        total_matches=$(echo "$http_body" | jq -r '.metadata.total_matches // 0')
+        echo "Total matches: $total_matches"
 
-            # Match VLAN UUID to IPAM-managed VLANs
-            local vlan_name=""
-            local vlan_tag=""
-            for index in "${!ipam_vlans[@]}"; do
-                if [[ "${ipam_vlans[$index]}" == "$vlan_uuid" ]]; then
-                    vlan_name="${ipam_vlan_names[$index]}"
-                    vlan_tag="${ipam_vlan_tags[$index]}"
-                    log_debug "Debug: Matched VLAN UUID $vlan_uuid to VLAN Name $vlan_name and Tag $vlan_tag."
-                    break
+        echo "$http_body" | jq -c '.entities[]' | while read -r entity; do
+            local vm_name=$(echo "$entity" | jq -r '.status.name // empty')
+            local nic_list=$(echo "$entity" | jq -c '.status.resources.nic_list[]?')
+
+            echo "$nic_list" | jq -c 'select(.ip_endpoint_list[]?.ip_type == "DHCP")' | while read -r nic; do
+                local ip_address=$(echo "$nic" | jq -r '.ip_endpoint_list[]?.ip // empty')
+                local mac_address=$(echo "$nic" | jq -r '.mac_address // empty')
+                local vlan_uuid=$(echo "$nic" | jq -r '.subnet_reference.uuid // empty')
+
+                log_debug "Debug: Processing VM $vm_name with IP $ip_address, VLAN UUID $vlan_uuid"
+
+                # Match VLAN UUID to IPAM-managed VLANs
+                local vlan_name=""
+                local vlan_tag=""
+                for index in "${!ipam_vlans[@]}"; do
+                    if [[ "${ipam_vlans[$index]}" == "$vlan_uuid" ]]; then
+                        vlan_name="${ipam_vlan_names[$index]}"
+                        vlan_tag="${ipam_vlan_tags[$index]}"
+                        log_debug "Debug: Matched VLAN UUID $vlan_uuid to VLAN Name $vlan_name and Tag $vlan_tag."
+                        break
+                    fi
+                done
+
+                if [[ -z "$vlan_name" || -z "$vlan_tag" ]]; then
+                    log_debug "Debug: Skipping VLAN UUID $vlan_uuid. No match found in IPAM-managed VLANs."
+                    continue
+                fi
+
+                # Generate normalized hostname
+                local normalized_hostname=$(echo "$vm_name" | tr -cd '[:alnum:].-' | tr '[:upper:]' '[:lower:]')
+                log_debug "Debug: Normalized hostname before substitution: $normalized_hostname"
+
+                if [[ -z "$normalized_hostname" ]]; then
+                    log_debug "Debug: Skipping entry due to empty normalized hostname."
+                    continue
+                fi
+
+                # Substitute with preferred hostname if available
+                local hostname=${hostname_map[$normalized_hostname]:-$normalized_hostname}
+                log_debug "Debug: Using hostname: $hostname"
+
+                export PGPASSWORD="$(vault kv get -field=password secret/ipa/psql/ahv_admin)"
+
+                psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
+                    INSERT INTO leases (ip_address, vm_name, hostname, mac_address, vlan_uuid, vlan_name, vlan_tag, last_updated)
+                    VALUES ('$ip_address', '$vm_name', '$hostname', '$mac_address', '$vlan_uuid', '$vlan_name', $vlan_tag, NOW())
+                    ON CONFLICT (ip_address) DO UPDATE
+                    SET vm_name = EXCLUDED.vm_name,
+                        hostname = EXCLUDED.hostname,
+                        mac_address = EXCLUDED.mac_address,
+                        vlan_uuid = EXCLUDED.vlan_uuid,
+                        vlan_name = EXCLUDED.vlan_name,
+                        vlan_tag = EXCLUDED.vlan_tag,
+                        last_updated = NOW();
+                "
+
+                if [ $? -ne 0 ]; then
+                    echo "Error: Failed to insert lease for VM $vm_name ($ip_address)."
                 fi
             done
-
-            if [[ -z "$vlan_name" || -z "$vlan_tag" ]]; then
-                log_debug "Debug: Skipping VLAN UUID $vlan_uuid. No match found in IPAM-managed VLANs."
-                continue
-            fi
-
-            # Generate normalized hostname
-            local normalized_hostname=$(echo "$vm_name" | tr -cd '[:alnum:].-' | tr '[:upper:]' '[:lower:]')
-            log_debug "Debug: Normalized hostname before substitution: $normalized_hostname"
-
-            # Debug: Validate array access
-            if [[ -z "$normalized_hostname" ]]; then
-                log_debug "Debug: Skipping entry due to empty normalized hostname."
-                continue
-            fi
-
-            # Substitute with preferred hostname if available
-            if [[ -v "hostname_map[$normalized_hostname]" ]]; then
-                local hostname="${hostname_map[$normalized_hostname]}"
-                log_debug "Debug: Substituted hostname: $hostname"
-            else
-                local hostname="$normalized_hostname"
-                log_debug "Debug: Using normalized hostname: $hostname"
-            fi
-
-            export PGPASSWORD="$(vault kv get -field=password secret/ipa/psql/ahv_admin)"
-
-            psql -U ahv_admin -h "$postgres_host" -d "$ahv_ipam_db" -c "
-                INSERT INTO leases (ip_address, vm_name, hostname, mac_address, vlan_uuid, vlan_name, vlan_tag, last_updated)
-                VALUES ('$ip_address', '$vm_name', '$hostname', '$mac_address', '$vlan_uuid', '$vlan_name', $vlan_tag, NOW())
-                ON CONFLICT (ip_address) DO UPDATE
-                SET vm_name = EXCLUDED.vm_name,
-                    hostname = EXCLUDED.hostname,
-                    mac_address = EXCLUDED.mac_address,
-                    vlan_uuid = EXCLUDED.vlan_uuid,
-                    vlan_name = EXCLUDED.vlan_name,
-                    vlan_tag = EXCLUDED.vlan_tag,
-                    last_updated = NOW();
-            "
-            if [ $? -ne 0 ]; then
-                echo "Error: Failed to insert lease for VM $vm_name ($ip_address)."
-            fi
         done
+
+        offset=$((offset + batch_size))
     done
+
     echo "VM lease data processing complete."
 }
 
@@ -403,7 +394,7 @@ EOF
     # Query the leases database
     export PGPASSWORD="$(vault kv get -field=password secret/ipa/psql/ahv_admin)"
     local query="SELECT ip_address, hostname FROM leases;"
-    local result=$(psql -U ahv_admin -h "$postgres_host" -d "$ahv_ipam_db" -t -A -F, -c "$query")
+    local result=$(psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -t -A -F, -c "$query")
 
     if [[ -z "$result" ]]; then
         echo "No entries found in the database to update DDNS."
@@ -459,7 +450,7 @@ case "$1" in
     create_db)
         test_vault_connection
         ahv_admin_password=$(get_or_set_vault_password)
-        check_or_create_database "$postgres_host" "$ahv_ipam_db" "ahv_admin" "$ahv_admin_password"
+        check_or_create_database "$POSTGRES_HOST" "$AHV_IPAM_DB" "ahv_admin" "$ahv_admin_password"
         ;;
     save_credentials)
         save_credentials "$2" "$3" "$4"

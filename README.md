@@ -1,11 +1,10 @@
 # ahv-ipam-ddns 
 
-AHV IPAM DDNS Integration
-
-A Bash script for synchronizing DNS with Nutanix AHV-managed IPAM leases using dynamic DNS updates
+AHV IPAM DDNS Integration  
+A Bash script for synchronizing DNS with Nutanix AHV-managed IPAM leases using dynamic DNS updates  
   
 ## Overview
-The AHV IPAM DDNS Integration script provides an automated solution for synchronizing DNS records with Nutanix AHV-managed IPAM leases using secure TSIG-authenticated DDNS updates. Designed for environments relying on Nutanix AHV IPAM, the script dynamically retrieves VM lease data, updates DNS records, and cleans up stale entries to maintain a consistent and accurate DNS state.
+The AHV IPAM DDNS Integration script provides an automated solution for synchronizing DNS records with Nutanix AHV-managed IPAM leases using secure TSIG-authenticated DDNS updates. Designed for environments relying on Nutanix AHV IPAM, the script dynamically retrieves VM lease data, updates DNS records, and cleans up stale entries to maintain a consistent and accurate DNS state.  
 
 This first version supports Nutanix Basic VLANs only. It does not support Network Controller-based VLANs. Support for these will be added in a future release.
 
@@ -45,13 +44,13 @@ Software Requirements
 Vault must be unsealed and accessible from the host running the script.
 
 ## Installation and Setup
-Step 1: Clone the Repository
-  git clone https://github.com/steve-eyler/ahv-ipam-ddns
-  cd ahv-ipam-ddns
-
-Step 2: Configure the JSON File
-Edit the ahv_ipam_ddns.json configuration file:
-
+Step 1: Clone the Repository  
+	  git clone https://github.com/steve-eyler/ahv-ipam-ddns  
+	  cd ahv-ipam-ddns  
+  
+Step 2: Configure the JSON File  
+Edit the ahv_ipam_ddns.json configuration file:  
+  
 ```json
 {
     "dns_ip_address": "10.1.150.101",
@@ -64,9 +63,9 @@ Edit the ahv_ipam_ddns.json configuration file:
     "ahv_ipam_db": "ahv_ipam_db"
 }
 ```
- 
-Step 3: Add Hostname Substitution File (optional)
-  Create a file (default ddns_hostnames.csv) to define preferred hostnames in the format:
+  
+Step 3: Add Hostname Substitution File (optional)  
+  Specify a file in the config (default ddns_hostnames.csv) to map vm names to preferred hostnames in the format:  
 ```
     normalized_vm_name,preferred_hostname
     lab-softwaredistribution,lcm
@@ -78,25 +77,32 @@ Step 3: Add Hostname Substitution File (optional)
 
 Step 4: Save Prism Central Credentials to Vault
 
-Run the following command to store Prism Central credentials in Vault:
-  ./ahv_ipam_ddns.sh save_credentials {prism_central_ip} {username} {password}
+Run the following command to store Prism Central credentials in Vault:  
+	  ./ahv_ipam_ddns.sh save_credentials {prism_central_ip} {username} {password}
 
-Replace {prism_central_ip}, {username}, and {password} with your Prism Central details.
+Replace {prism_central_ip}, {username}, and {password} with your Prism Central details.  
 This will store the credentials in Vault at secret/nutanix/prism_central_ip and secret/nutanix/encoded_credentials
 
-Step 5: Create the Database
+Step 5: Create the Database  
 
 Run the script to create the required database and table:
-  ./ahv_ipam_ddns.sh create_db
+	  ./ahv_ipam_ddns.sh create_db
 
 This will:
 -  Create the leases table in the database specified in the configuration file.
 -  Ensure the ahv_admin user has the necessary permissions.
 
-Step 6: Automate with Cron
+Step 6: Retrieve the current IP assignments  
+	  ./ahv_ipam_ddns.sh get_leases
 
-Set up a cron job to automate periodic tasks:
-  ./ahv_ipam_ddns.sh setup_cron
+Step 7: Examine the database  
+	  ./ahv_ipam_ddns.sh show_leases
+
+Step 8. Update DNS via DDNS  
+	  ./ahv_ipam_ddns.sh update_dns
+
+Step 9. Update with Cron  
+	  ./ahv_ipam_ddns.sh setup_cron
 
 The cron job will:
 -  Retrieve VM leases
@@ -105,34 +111,34 @@ The cron job will:
 
 ## Usage
 
-Manual Execution
-  Run individual functions as needed:
+Manual Execution  
+  Run individual functions as needed:  
 
-  Store Prism Central Credentials:
-    ./ahv_ipam_ddns.sh save_credentials {prism_central_ip} {username} {password}
-
-  Retrieve Leases:
-    ./ahv_ipam_ddns.sh get_leases
+  Store Prism Central Credentials:  
+    ./ahv_ipam_ddns.sh save_credentials {prism_central_ip} {username} {password}  
   
-  Show Lease Database:
-    ./ahv_ipam_ddns.sh show_leases
-
-  Update DNS:
-    ./ahv_ipam_ddns.sh update_ddns
+  Retrieve Leases:  
+    ./ahv_ipam_ddns.sh get_leases  
+    
+  Show Lease Database:  
+    ./ahv_ipam_ddns.sh show_leases  
   
-  Clean Up Stale Entries:
-    ./ahv_ipam_ddns.sh cleanup_leases
-
-Verify Logs
-All output is written to /var/log/ahv_ipam.log by default. Check the log for details:
-
-tail -f /var/log/ahv_ipam.log
-
+  Update DNS:  
+    ./ahv_ipam_ddns.sh update_ddns  
+    
+  Clean Up Stale Entries:  
+    ./ahv_ipam_ddns.sh cleanup_leases  
+  
+Verify Logs  
+All output is written to /var/log/ahv_ipam.log by default. Check the log for details:  
+  
+tail -f /var/log/ahv_ipam.log  
+  
 ## Notes and Limitations
 
-<b>Basic VLANs Only</b>: This version supports only Nutanix Basic VLANs. Network Controller VLAN support will be added in a future release.
-Vault Requirement: The script relies on HashiCorp Vault for securely storing secrets. Ensure Vault is set up and accessible.
-Flexibility: While written for a specific use case, the script can be modified to work with other environments and configurations.
+<b>Basic VLANs Only</b>: This version supports only Nutanix Basic VLANs. Network Controller VLAN support will be added in a future release.  
+<b>Vault Requirement</b>: The script relies on HashiCorp Vault for securely storing secrets. Ensure Vault is set up and accessible. You can replace the HashiCorp Vault requirement with alternate secret handling in the script if desired.  
+<b>Flexibility</b>: While written for a specific use case, the script includes comments and can be modified to work with other environments and configurations. get_leases() syncs the IPAM leases with the psql database. Pushing DDNS updates with nsupdate is a separate and optional function.
 
 Contributing
 Contributions are welcome. If you have suggestions, find a bug, or want to add a feature, feel free to open an issue or submit a pull request.
