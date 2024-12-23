@@ -23,17 +23,17 @@ Software Requirements
 -  PostgreSQL: Database for tracking leases and managing cleanup.
 -  HashiCorp Vault: Secure storage for secrets such as TSIG keys and database credentials.
 
-Dependencies:
+## Additional Dependencies
 -  jq: For parsing JSON.
 -  curl: For API requests.
 -  psql: PostgreSQL CLI tool.
 -  nsupdate: For DDNS updates.
+- ahv_ipam_ddns.json must be in proper JSON format and validated (e.g., using jq)
 
-User and Permissions
+## User Credentials and Permissions
 -  PostgreSQL User: The script expects a user named ahv_admin with permissions to create and manage tables in the specified database.
    You can pre-create the leases table if permissions are restricted.
-- ahv_ipam_ddns.json must be in proper JSON format and validated (e.g., using jq)
--  Vault Setup:
+-  HashiCorp Vault Setup:
      Store the following secrets in HashiCorp Vault:
      - Prism Central Credentials: secret/nutanix/prism_central_ip and secret/nutanix/encoded_credentials
        This can be done using the script (ahv_ipam_ddns save_credentials) if vault access policy allows
@@ -62,8 +62,8 @@ Edit the ahv_ipam_ddns.json configuration file:
 }
 
 Step 3: Add Hostname Substitution File (optional)
-  Create a file named ddns_hostnames.csv to define preferred hostnames in the format:
-    normalized_hostname,preferred_hostname
+  Create a file (default ddns_hostnames.csv) to define preferred hostnames in the format:
+    normalized_vm_name,preferred_hostname
     lab-softwaredistribution,lcm
     lab-wireshark,wireshark
     se-saratoga,saratoga
