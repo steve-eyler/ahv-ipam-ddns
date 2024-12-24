@@ -3,7 +3,7 @@
     "domain_name": "lab.steveeyler.com",
     "nutanix_polling_interval": 5,
     "stale_entry_timeout": 300,
-    "hostname_substitution_file": "/home/steve/github/ddns_hostnames.csv",
+    "hostname_substitution_file": "/home/steve/ddns_hostnames.csv",
     "log_level": 1,
     "postgres_host": "10.1.150.101",
     "ahv_ipam_db": "ahv_ipam_db"
