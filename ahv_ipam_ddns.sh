@@ -80,14 +80,15 @@ usage() {
     echo "Usage: $0 <command>"
     echo "Commands:"
     echo "  create_db          Create the database and required tables."
+    echo "  reset_db           Clear out all entries from 'leases' table."
+    echo "  prune_db           Remove specified entries from 'leases' table and from DDNS."
     echo "  save_credentials   Save Prism Central credentials to Vault."
     echo "  get_leases         Fetch leases from Nutanix Prism Central and update the database."
     echo "  show_leases        Display all active leases in the database."
     echo "  cleanup_leases     Prune leases older than the TTL from database."
     echo "  update_ddns        Update DDNS with AHV lease database."
     echo "  setup_cron         Automate updates based on a polling interval."
-    echo "  get_names          List VMs + normalized name + substitution if found."
-    echo "  reset_db           Clear out all entries from 'leases' table."
+    echo "  show_hostnames     List VMs by normalized name + substitution hostname if found."
     exit 1
 }
 
@@ -184,7 +185,7 @@ check_or_create_database() {
         # If the existing column is BOOLEAN, convert it:
         # (If you definitely want to force it to TEXT.)
         local coltype=$(psql -U "$user" -h "$host" -d "$db" -tAc \
-           "SELECT data_type FROM information_schema.columns 
+           "SELECT data_type FROM information_schema.columns
              WHERE table_name='leases' AND column_name='preexisting_dns';")
 
         if [ "$coltype" == "boolean" ]; then
@@ -193,7 +194,7 @@ check_or_create_database() {
                 ALTER TABLE leases
                 ALTER COLUMN preexisting_dns DROP DEFAULT;
                 ALTER TABLE leases
-                ALTER COLUMN preexisting_dns TYPE TEXT USING (CASE 
+                ALTER COLUMN preexisting_dns TYPE TEXT USING (CASE
                     WHEN preexisting_dns = true THEN 'true'
                     WHEN preexisting_dns = false THEN 'false'
                     ELSE 'unknown' END);
@@ -357,7 +358,7 @@ get_ipam_vlans() {
 ###############################################################################
 show_leases() {
     export PGPASSWORD="$(${VAULT_BIN} kv get -field=password secret/ipa/psql/ahv_admin)"
-    psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "SELECT * FROM leases;"
+    psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "SELECT * FROM leases ORDER BY vm_name;"
 }
 
 ###############################################################################
@@ -429,8 +430,9 @@ EOF
 # update_ddns:
 #   - Looks at all rows in 'leases'
 #   - If preexisting_dns='true', skip
-#   - If DNS forward/reverse found, mark preexisting_dns='true'
-#   - Else do normal ddns create + mark as 'false'
+#   - If DNS forward/reverse found and current preexisting_dns='unknown',
+#       set preexisting_dns='true' (do NOT overwrite if it's 'false')
+#   - Else proceed with ddns create + set preexisting_dns='false'
 ###############################################################################
 update_ddns() {
     echo "Updating DDNS with entries from the database..."
@@ -473,7 +475,7 @@ EOF
         local fqdn="${hostname}.${domain}"
         echo "Processing $fqdn ($ip_address)..."
 
-        # If already 'true', skip
+        # If already 'true', skip entirely
         if [[ "$preexisting" == "true" ]]; then
             echo "Skipping $fqdn since preexisting_dns=true."
             continue
@@ -488,18 +490,24 @@ EOF
         nslookup "$ip_address" "$dns_server" >/dev/null 2>&1
         local reverse_rc=$?
 
-        # If forward_rc=0 or reverse_rc=0, that means some DNS record is present
+        # If forward_rc=0 or reverse_rc=0 => Some DNS record is present
         if [[ $forward_rc -eq 0 || $reverse_rc -eq 0 ]]; then
-            echo "DNS record found for $fqdn or $ip_address. Marking preexisting_dns='true'."
-            psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
-                UPDATE leases
-                   SET preexisting_dns = 'true'
-                 WHERE ip_address = '$ip_address';
-            " >/dev/null 2>&1
+            # Only mark 'true' if current preexisting_dns='unknown'
+            if [[ "$preexisting" == "unknown" ]]; then
+                echo "DNS record found for $fqdn or $ip_address. Marking preexisting_dns='true'."
+                psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
+                    UPDATE leases
+                       SET preexisting_dns = 'true'
+                     WHERE ip_address = '$ip_address'
+                       AND preexisting_dns = 'unknown';
+                " >/dev/null 2>&1
+            else
+                echo "DNS record found, but existing preexisting_dns='$preexisting' so no change."
+            fi
             continue
         fi
 
-        # Otherwise, do normal 'delete/add' to create the record
+        # If no forward or reverse DNS record, then create it (mark 'false')
         local nsupdate_file="/tmp/nsupdate_${hostname}.txt"
         cat > "$nsupdate_file" <<EOF
 server $dns_server
@@ -512,7 +520,6 @@ EOF
         nsupdate -k "$tsig_key_file" "$nsupdate_file"
         if [ $? -eq 0 ]; then
             echo "Successfully created/updated DDNS for $fqdn ($ip_address). Marking preexisting_dns='false'."
-            # Mark it as false (meaning "we created this record dynamically")
             psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
                 UPDATE leases
                    SET preexisting_dns = 'false'
@@ -544,6 +551,151 @@ reset_db() {
     else
         echo "reset_db completed. All entries cleared from leases table."
     fi
+}
+
+###############################################################################
+# prune_db:
+#   - If first argument is "all", remove all entries with preexisting_dns='false'
+#       from the database and DNS (nsupdate).
+#   - If first argument is missing, show usage.
+#   - Otherwise, treat each argument as either an IP or a hostname.
+#       For each matching row in 'leases':
+#         -> If preexisting_dns='false', remove from DNS + DB
+#         -> If preexisting_dns='true', remove only from DB (DNS is not ours)
+###############################################################################
+prune_db() {
+    # Check usage
+    if [[ $# -lt 1 ]]; then
+        echo "Usage:"
+        echo "  prune_db all"
+        echo "  prune_db <ip_or_hostname_1> [<ip_or_hostname_2> ...]"
+        return 1
+    fi
+
+    local tsig_key
+    tsig_key="$(${VAULT_BIN} kv get -field=tsig_key secret/ipa/dns)"
+    local dns_server="$DNS_IP_ADDRESS"
+    local domain="$DOMAIN_NAME"
+
+    if [[ -z "$tsig_key" ]]; then
+        echo "Error: TSIG key not found or could not be retrieved from Vault."
+        return 1
+    fi
+
+    export PGPASSWORD="$(${VAULT_BIN} kv get -field=password secret/ipa/psql/ahv_admin)"
+
+    # Create TSIG key file for nsupdate
+    local tsig_key_file="/tmp/ipa_ddns_key.key"
+    cat > "$tsig_key_file" <<EOF
+key "ipa_ddns_key" {
+    algorithm hmac-sha256;
+    secret "$tsig_key";
+};
+EOF
+    trap 'rm -f "$tsig_key_file"' EXIT
+
+    # If we are pruning "all", remove any row with preexisting_dns='false'
+    if [[ "$1" == "all" ]]; then
+        echo "Pruning ALL dynamic (preexisting_dns='false') entries from database & DNS..."
+
+        local all_query="SELECT ip_address, hostname FROM leases WHERE preexisting_dns='false';"
+        local all_result
+        all_result="$(psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -t -A -F '|' -c "$all_query")"
+
+        if [[ -z "$all_result" ]]; then
+            echo "No dynamic entries found to prune."
+            return 0
+        fi
+
+        # Remove each dynamic entry from DNS, then from DB
+        while IFS='|' read -r ip_address hostname; do
+            [[ -z "$hostname" ]] && continue
+            local fqdn="$hostname.$domain"
+
+            echo "Removing dynamic DNS record for $fqdn ($ip_address)..."
+            # Build nsupdate file to delete the record
+            local nsupdate_file="/tmp/nsupdate_prune_${hostname}.txt"
+            cat > "$nsupdate_file" <<EOF
+server $dns_server
+zone $domain
+update delete $fqdn A
+send
+EOF
+            nsupdate -k "$tsig_key_file" "$nsupdate_file"
+            if [ $? -eq 0 ]; then
+                echo "DNS entry $fqdn removed."
+            else
+                echo "Warning: Failed to remove DNS entry for $fqdn."
+            fi
+            rm -f "$nsupdate_file"
+        done <<< "$all_result"
+
+        # Finally remove them from the DB
+        psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
+            DELETE FROM leases
+             WHERE preexisting_dns='false';
+        " >/dev/null 2>&1
+
+        echo "All dynamic entries removed from the database."
+        return 0
+    fi
+
+    # Otherwise, each argument is an IP or hostname to remove
+    echo "Pruning specified entries..."
+    # Notice we do NOT shift here if $1 != 'all'
+    for arg in "$@"; do
+        # Find a row by IP or hostname
+        local row_query="
+            SELECT ip_address, hostname, preexisting_dns
+              FROM leases
+             WHERE ip_address = '$arg'
+                OR hostname   = '$arg'
+             LIMIT 1;
+        "
+        local row
+        row="$(psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -t -A -F '|' -c "$row_query")"
+
+        if [[ -z "$row" ]]; then
+            echo "No matching lease database entry found for '$arg'. Skipping..."
+            continue
+        fi
+
+        local ip_address
+        ip_address="$(echo "$row" | cut -d'|' -f1)"
+        local hostname
+        hostname="$(echo "$row" | cut -d'|' -f2)"
+        local preexisting_dns_val
+        preexisting_dns_val="$(echo "$row" | cut -d'|' -f3)"
+
+        echo "Found matching entry: $ip_address / $hostname (preexisting_dns=$preexisting_dns_val). Removing..."
+
+        # If the entry was dynamically created, remove from DNS
+        if [[ "$preexisting_dns_val" == "false" ]]; then
+            local fqdn="$hostname.$domain"
+            local nsupdate_file="/tmp/nsupdate_prune_${hostname}.txt"
+            cat > "$nsupdate_file" <<EOF
+server $dns_server
+zone $domain
+update delete $fqdn A
+send
+EOF
+            nsupdate -k "$tsig_key_file" "$nsupdate_file"
+            if [ $? -eq 0 ]; then
+                echo "DNS entry $fqdn removed."
+            else
+                echo "Warning: Failed to remove DNS entry for $fqdn."
+            fi
+            rm -f "$nsupdate_file"
+        fi
+
+        # Now remove from the database
+        local delete_query="
+            DELETE FROM leases
+             WHERE ip_address = '$ip_address';
+        "
+        psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "$delete_query" >/dev/null 2>&1
+        echo "Database entry for $ip_address removed."
+    done
 }
 
 ###############################################################################
@@ -745,10 +897,10 @@ get_leases() {
 }
 
 ###############################################################################
-# get_names:
+# show_hostnames:
 #   - Lists all from 'leases' => prints normalized name plus the current hostname
 ###############################################################################
-get_names() {
+show_hostnames() {
     echo "Fetching VM names from the leases database..."
     export PGPASSWORD="$(${VAULT_BIN} kv get -field=password secret/ipa/psql/ahv_admin)"
 
@@ -819,15 +971,16 @@ case "$1" in
     setup_cron)
         setup_cron
         ;;
-    get_names)
-        get_names
+    show_hostnames)
+        show_hostnames
         ;;
     reset_db)
         reset_db
+        ;;
+    prune_db)
+        prune_db  "${@:2}"
         ;;
     *)
         usage
         ;;
 esac
-
-

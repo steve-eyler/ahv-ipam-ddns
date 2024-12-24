@@ -1,10 +1,10 @@
 {
     "dns_ip_address": "10.1.150.101",
     "domain_name": "lab.steveeyler.com",
-    "nutanix_polling_interval": 5,
-    "stale_entry_timeout": 300,
+    "nutanix_polling_interval": 1,
+    "stale_entry_timeout": 180,
     "hostname_substitution_file": "/home/steve/ddns_hostnames.csv",
-    "log_level": 1,
+    "log_level": 0,
     "postgres_host": "10.1.150.101",
     "ahv_ipam_db": "ahv_ipam_db"
 }
