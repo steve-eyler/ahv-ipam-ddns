@@ -1,6 +1,8 @@
 normalizedvmname,preferred-hostname
 lab-softwaredistribution,lcm
 lab-wireshark,wireshark
+nutanixmove4.7.1,move
+prod-jumpbox51d48,jumpbox
 se-saratoga,saratoga
 se-stargazer,stargazer
 se-valiant,valiant

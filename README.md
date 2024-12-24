@@ -95,13 +95,10 @@ This will:
 Step 6: Retrieve the current IP assignments  
 	  ./ahv_ipam_ddns.sh get_leases
 
-Step 7: Examine the database  
-	  ./ahv_ipam_ddns.sh show_leases
-
-Step 8. Update DNS via DDNS  
+Step 7. Update DNS via DDNS  
 	  ./ahv_ipam_ddns.sh update_dns
 
-Step 9. Update with Cron  
+Step 8. Update with Cron  
 	  ./ahv_ipam_ddns.sh setup_cron
 
 The cron job will:
@@ -117,17 +114,20 @@ Manual Execution
   Store Prism Central Credentials:  
     ./ahv_ipam_ddns.sh save_credentials {prism_central_ip} {username} {password}  
   
-  Retrieve Leases:  
+  Retrieve Leases - Query Prism Central for IP addresses on Nutanix IPAM-managed VLANs:  
     ./ahv_ipam_ddns.sh get_leases  
     
-  Show Lease Database:  
+  Show Lease Database - Query and display contents of psql lease table:  
     ./ahv_ipam_ddns.sh show_leases  
   
-  Update DNS:  
+  Update DNS - Update DNS with least table via DDNS for hosts that do not already have A or PTR records):  
     ./ahv_ipam_ddns.sh update_ddns  
     
-  Clean Up Stale Entries:  
+  Clean Up Stale Entries (removes stale entries from leases db and ddns):  
     ./ahv_ipam_ddns.sh cleanup_leases  
+
+  Reset Database (removes all entries, does not affect ddns):  
+    ./ahv_ipam_ddns.sh reset_db  
   
 Verify Logs  
 All output is written to /var/log/ahv_ipam.log by default. Check the log for details:  

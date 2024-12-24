@@ -4,7 +4,7 @@
     "nutanix_polling_interval": 5,
     "stale_entry_timeout": 300,
     "hostname_substitution_file": "ddns_hostnames.csv",
-    "debug_enabled": true,
+    "log_level": 22,
     "postgres_host": "10.1.150.101",
     "ahv_ipam_db": "ahv_ipam_db"
 }
