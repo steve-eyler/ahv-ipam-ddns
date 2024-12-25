@@ -3,7 +3,7 @@
 ###############################################################################
 # CONFIGURATION / PATHS
 ###############################################################################
-config_file="/home/steve/github/ahv_ipam_ddns.json"
+config_file="/home/steve/ahv_ipam_ddns/ahv_ipam_ddns.json"
 
 TOKEN_FILE="/tmp/ahv_admin-app-policy.token"
 export VAULT_ADDR="https://10.1.150.103:8200"
@@ -463,46 +463,44 @@ EOF
     result="$(psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -t -A -F '|' -c "$query")"
 
     if [[ -z "$result" ]]; then
-        echo "No entries found in the database to update DDNS."
+        [ "$LOG_LEVEL" -gt 0 ] && echo "No entries found in the database to update DDNS."
         return 0
     fi
 
+    local changes_made=0
     while IFS='|' read -r ip_address hostname preexisting; do
         if [[ -z "$hostname" ]]; then
             continue
         fi
 
         local fqdn="${hostname}.${domain}"
-        echo "Processing $fqdn ($ip_address)..."
+        [ "$LOG_LEVEL" -gt 0 ] && echo "Processing $fqdn ($ip_address)..."
 
         # If already 'true', skip entirely
         if [[ "$preexisting" == "true" ]]; then
-            echo "Skipping $fqdn since preexisting_dns=true."
+            [ "$LOG_LEVEL" -gt 0 ] && echo "Skipping $fqdn since preexisting_dns=true."
             continue
         fi
 
         # Check if DNS record already exists (forward or reverse)
-        log_debug 1 "Checking forward DNS with: nslookup \"$fqdn\" \"$dns_server\""
         nslookup "$fqdn" "$dns_server" >/dev/null 2>&1
         local forward_rc=$?
 
-        log_debug 1 "Checking reverse DNS with: nslookup \"$ip_address\" \"$dns_server\""
         nslookup "$ip_address" "$dns_server" >/dev/null 2>&1
         local reverse_rc=$?
 
-        # If forward_rc=0 or reverse_rc=0 => Some DNS record is present
         if [[ $forward_rc -eq 0 || $reverse_rc -eq 0 ]]; then
-            # Only mark 'true' if current preexisting_dns='unknown'
             if [[ "$preexisting" == "unknown" ]]; then
-                echo "DNS record found for $fqdn or $ip_address. Marking preexisting_dns='true'."
+                [ "$LOG_LEVEL" -gt 0 ] && echo "DNS record found for $fqdn or $ip_address. Marking preexisting_dns='true'."
                 psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
                     UPDATE leases
                        SET preexisting_dns = 'true'
                      WHERE ip_address = '$ip_address'
                        AND preexisting_dns = 'unknown';
                 " >/dev/null 2>&1
+                changes_made=1
             else
-                echo "DNS record found, but existing preexisting_dns='$preexisting' so no change."
+                [ "$LOG_LEVEL" -gt 0 ] && echo "DNS record found, but existing preexisting_dns='$preexisting' so no change."
             fi
             continue
         fi
@@ -519,20 +517,25 @@ EOF
 
         nsupdate -k "$tsig_key_file" "$nsupdate_file"
         if [ $? -eq 0 ]; then
-            echo "Successfully created/updated DDNS for $fqdn ($ip_address). Marking preexisting_dns='false'."
+            echo "Successfully created/updated DDNS for $fqdn ($ip_address)." >&2
             psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
                 UPDATE leases
                    SET preexisting_dns = 'false'
                  WHERE ip_address = '$ip_address';
             " >/dev/null 2>&1
+            changes_made=1
         else
-            echo "Error: Failed to update DDNS for $fqdn ($ip_address)."
+            echo "Error: Failed to update DDNS for $fqdn ($ip_address)." >&2
         fi
 
         rm -f "$nsupdate_file"
     done <<< "$result"
 
-    echo "DDNS update process complete."
+    if [[ $changes_made -eq 0 && "$LOG_LEVEL" -eq 0 ]]; then
+        echo "No changes made to DDNS." >&2
+    else
+        echo "DDNS update process complete." >&2
+    fi
 }
 
 ###############################################################################
@@ -598,51 +601,56 @@ EOF
     if [[ "$1" == "all" ]]; then
         echo "Pruning ALL dynamic (preexisting_dns='false') entries from database & DNS..."
 
-        local all_query="SELECT ip_address, hostname FROM leases WHERE preexisting_dns='false';"
+        local all_query="SELECT ip_address, hostname, preexisting_dns FROM leases;"
         local all_result
         all_result="$(psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -t -A -F '|' -c "$all_query")"
 
         if [[ -z "$all_result" ]]; then
-            echo "No dynamic entries found to prune."
+            echo "No entries found to prune."
             return 0
         fi
 
-        # Remove each dynamic entry from DNS, then from DB
-        while IFS='|' read -r ip_address hostname; do
+        # Iterate through each entry
+        while IFS='|' read -r ip_address hostname preexisting_dns_val; do
             [[ -z "$hostname" ]] && continue
             local fqdn="$hostname.$domain"
 
-            echo "Removing dynamic DNS record for $fqdn ($ip_address)..."
-            # Build nsupdate file to delete the record
-            local nsupdate_file="/tmp/nsupdate_prune_${hostname}.txt"
-            cat > "$nsupdate_file" <<EOF
+            if [[ "$preexisting_dns_val" == "false" ]]; then
+                echo "Removing dynamic DNS record for $fqdn ($ip_address)..."
+                # Build nsupdate file to delete the record
+                local nsupdate_file="/tmp/nsupdate_prune_${hostname}.txt"
+                cat > "$nsupdate_file" <<EOF
 server $dns_server
 zone $domain
 update delete $fqdn A
 send
 EOF
-            nsupdate -k "$tsig_key_file" "$nsupdate_file"
-            if [ $? -eq 0 ]; then
-                echo "DNS entry $fqdn removed."
+                nsupdate -k "$tsig_key_file" "$nsupdate_file"
+                if [ $? -eq 0 ]; then
+                    echo "DNS entry $fqdn removed."
+                else
+                    echo "Warning: Failed to remove DNS entry for $fqdn."
+                fi
+                rm -f "$nsupdate_file"
             else
-                echo "Warning: Failed to remove DNS entry for $fqdn."
+                echo "Entry $fqdn is pre-existing. Removing only from leases table."
             fi
-            rm -f "$nsupdate_file"
+
+            # Remove from the database regardless of DNS status
+            local delete_query="
+                DELETE FROM leases
+                 WHERE ip_address = '$ip_address';
+            "
+            psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "$delete_query" >/dev/null 2>&1
+            echo "Database entry for $ip_address removed."
         done <<< "$all_result"
 
-        # Finally remove them from the DB
-        psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
-            DELETE FROM leases
-             WHERE preexisting_dns='false';
-        " >/dev/null 2>&1
-
-        echo "All dynamic entries removed from the database."
+        echo "Pruning process completed."
         return 0
     fi
 
     # Otherwise, each argument is an IP or hostname to remove
     echo "Pruning specified entries..."
-    # Notice we do NOT shift here if $1 != 'all'
     for arg in "$@"; do
         # Find a row by IP or hostname
         local row_query="
@@ -669,7 +677,6 @@ EOF
 
         echo "Found matching entry: $ip_address / $hostname (preexisting_dns=$preexisting_dns_val). Removing..."
 
-        # If the entry was dynamically created, remove from DNS
         if [[ "$preexisting_dns_val" == "false" ]]; then
             local fqdn="$hostname.$domain"
             local nsupdate_file="/tmp/nsupdate_prune_${hostname}.txt"
@@ -686,9 +693,11 @@ EOF
                 echo "Warning: Failed to remove DNS entry for $fqdn."
             fi
             rm -f "$nsupdate_file"
+        else
+            echo "Entry $hostname is pre-existing. Removing only from leases table."
         fi
 
-        # Now remove from the database
+        # Remove from the database regardless of DNS status
         local delete_query="
             DELETE FROM leases
              WHERE ip_address = '$ip_address';
@@ -747,16 +756,18 @@ get_leases() {
     local offset=0
     local page_size=20
     local total_vm_matches=1
-    local lease_changes=0
+    local lease_changes=0  # We'll increment this in the same shell now.
 
-    # Export PGPASSWORD once up front (since we do many inserts)
+    # Export PGPASSWORD once up front (since we do multiple inserts)
     export PGPASSWORD="$(${VAULT_BIN} kv get -field=password secret/ipa/psql/ahv_admin)"
 
     while [ "$offset" -lt "$total_vm_matches" ]; do
-        local vm_payload='{"kind":"vm","offset":'"$offset"',"length":'"$page_size"'}'
+        local vm_payload
+        vm_payload='{"kind":"vm","offset":'"$offset"',"length":'"$page_size"'}'
         log_debug 1 "Calling vms/list with offset=$offset, length=$page_size"
 
-        local response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+        local response
+        response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
             "https://$prism_central_ip:9440/api/nutanix/v3/vms/list" \
             -H "Authorization: Basic $encoded_credentials" \
             -H "Content-Type: application/json" \
@@ -786,26 +797,30 @@ get_leases() {
         this_offset=$(echo "$http_body" | jq '.metadata.offset // 0')
         log_debug 1 "VM metadata.offset=$this_offset, metadata.length=$this_length, total_matches=$total_vm_matches"
 
-        # Parse out each VM entity
-        echo "$http_body" | jq -c '.entities[]' | while read -r entity; do
+        # Instead of piping into while read, capture .entities[] into a variable:
+        local entity_list
+        entity_list="$(echo "$http_body" | jq -c '.entities[]')"
+
+        # Now read from entity_list in the current shell
+        while read -r entity; do
             local vm_name
             vm_name=$(echo "$entity" | jq -r '.status.name // empty')
             log_debug 1 "Processing VM entity with name: $vm_name"
 
-            # For each NIC
+            # NIC list
             local nic_list
-            nic_list=$(echo "$entity" | jq -c '.status.resources.nic_list[]?')
+            nic_list="$(echo "$entity" | jq -c '.status.resources.nic_list[]?')"
 
-            while IFS= read -r nic; do
-                # Guard for empty or "null" subnet_reference.uuid
+            while read -r nic; do
+                # Check VLAN UUID to see if it's IPAM-managed
                 local vlan_uuid
-                vlan_uuid=$(echo "$nic" | jq -r '.subnet_reference.uuid // empty')
+                vlan_uuid="$(echo "$nic" | jq -r '.subnet_reference.uuid // empty')"
                 if [[ -z "$vlan_uuid" || "$vlan_uuid" == "null" ]]; then
                     log_debug 1 "No VLAN UUID on NIC for $vm_name—skipping."
                     continue
                 fi
 
-                # If we do not have an IPAM entry for this VLAN UUID, skip
+                # Skip if not in IPAM-managed VLAN set
                 if [[ -z "${ipam_name_by_uuid[$vlan_uuid]+exists}" ]]; then
                     log_debug 1 "Skipping NIC on $vm_name: VLAN UUID $vlan_uuid not IPAM-managed."
                     continue
@@ -814,24 +829,22 @@ get_leases() {
                 local vlan_name="${ipam_name_by_uuid[$vlan_uuid]}"
                 local vlan_tag="${ipam_tag_by_uuid[$vlan_uuid]}"
 
-                # For each IP endpoint
                 local ip_endpoint_list
-                ip_endpoint_list=$(echo "$nic" | jq -c '.ip_endpoint_list[]?')
+                ip_endpoint_list="$(echo "$nic" | jq -c '.ip_endpoint_list[]?')"
 
-                while IFS= read -r ip_ep; do
+                while read -r ip_ep; do
                     local ip_type
-                    ip_type=$(echo "$ip_ep" | jq -r '.ip_type')
+                    ip_type="$(echo "$ip_ep" | jq -r '.ip_type')"
                     local ip_address
-                    ip_address=$(echo "$ip_ep" | jq -r '.ip // empty')
+                    ip_address="$(echo "$ip_ep" | jq -r '.ip // empty')"
                     local mac_address
-                    mac_address=$(echo "$nic" | jq -r '.mac_address // empty')
+                    mac_address="$(echo "$nic" | jq -r '.mac_address // empty')"
 
-                    # If ip_address is empty, skip
                     if [[ -z "$ip_address" ]]; then
                         continue
                     fi
 
-                    # Only proceed if ip_type is in {DHCP,LEARNED,ASSIGNED,STATIC,null}
+                    # Only proceed for DHCP, LEARNED, ASSIGNED, STATIC, or null
                     if [[ "$ip_type" != "DHCP" && "$ip_type" != "LEARNED" \
                           && "$ip_type" != "ASSIGNED" && "$ip_type" != "STATIC" \
                           && "$ip_type" != "null" ]]; then
@@ -839,11 +852,11 @@ get_leases() {
                         continue
                     fi
 
-                    log_debug 1 "VM $vm_name has IP $ip_address ($ip_type), VLAN UUID $vlan_uuid => $vlan_name"
+                    log_debug 1 "VM $vm_name has IP $ip_address ($ip_type), VLAN $vlan_uuid => $vlan_name"
 
-                    # Normalize and possibly substitute
+                    # Normalize hostname
                     local normalized_hostname
-                    normalized_hostname=$(echo "$vm_name" | tr -cd '[:alnum:].-' | tr '[:upper:]' '[:lower:]')
+                    normalized_hostname="$(echo "$vm_name" | tr -cd '[:alnum:].-' | tr '[:upper:]' '[:lower:]')"
                     if [[ -z "$normalized_hostname" ]]; then
                         log_debug 1 "Skipping empty normalized hostname for $vm_name ($ip_address)."
                         continue
@@ -856,9 +869,7 @@ get_leases() {
                         log_debug 1 "Using normalized hostname: $final_hostname"
                     fi
 
-                    # Insert or update in the DB
-                    #   1) If new row => preexisting_dns='unknown'
-                    #   2) If existing row => do NOT overwrite preexisting_dns
+                    # Insert/update in the DB (preserving preexisting_dns)
                     psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
                         INSERT INTO leases (
                             ip_address, vm_name, hostname, mac_address,
@@ -876,15 +887,16 @@ get_leases() {
                                 vlan_name    = EXCLUDED.vlan_name,
                                 vlan_tag     = EXCLUDED.vlan_tag,
                                 last_updated = NOW()
-                            -- We do NOT overwrite preexisting_dns here
-                            -- so existing 'true' or 'false' remains untouched
                             ;
                     " >/dev/null 2>&1
 
+                    # Increment in the same shell
                     (( lease_changes++ ))
-                done < <(printf "%s\n" "$ip_endpoint_list")
-            done < <(printf "%s\n" "$nic_list")
-        done
+                done <<< "$ip_endpoint_list"
+
+            done <<< "$nic_list"
+
+        done <<< "$entity_list"
 
         offset=$(( offset + this_length ))
         if [ "$this_length" -eq 0 ]; then
