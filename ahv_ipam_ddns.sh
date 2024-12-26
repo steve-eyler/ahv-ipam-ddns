@@ -79,13 +79,14 @@ load_config() {
 usage() {
     echo "Usage: $0 <command>"
     echo "Commands:"
-    echo "  create_db          Create the database and required tables."
-    echo "  reset_db           Clear out all entries from 'leases' table."
-    echo "  prune_db           Remove specified entries from 'leases' table and from DDNS."
     echo "  save_credentials   Save Prism Central credentials to Vault."
+    echo "  create_db          Create the database and lease table."
+    echo "  delete_table       Delete the lease table (Drop the table from psql)"
+    echo "  reset_table        Clear out all entries from 'leases' table (no DDNS updates)."
     echo "  get_leases         Fetch leases from Nutanix Prism Central and update the database."
     echo "  show_leases        Display all active leases in the database."
     echo "  cleanup_leases     Prune leases older than the TTL from database."
+    echo "  prune_leases       Remove specified entries from 'leases' table and from DDNS."
     echo "  update_ddns        Update DDNS with AHV lease database."
     echo "  setup_cron         Automate updates based on a polling interval."
     echo "  show_hostnames     List VMs by normalized name + substitution hostname if found."
@@ -543,16 +544,51 @@ EOF
 #   - Clear all rows from 'leases' table
 #   - Does NOT remove DNS records
 ###############################################################################
-reset_db() {
+reset_table() {
+    echo "WARNING: This operation will clear out the local leases table but will NOT remove any entries in DDNS."
+    echo "If you proceed, all entries in DNS will remain static and must be cleaned manually."
+    echo "Running 'get_leases' again will mark all entries as pre-existing and unmanaged by this tool."
+    read -p "Are you sure you want to reset the leases table? (yes/no): " confirm
+
+    if [[ "$confirm" != "yes" ]]; then
+        echo "Operation cancelled."
+        return 1
+    fi
+
     export PGPASSWORD="$(${VAULT_BIN} kv get -field=password secret/ipa/psql/ahv_admin)"
     psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
         DELETE FROM leases;
     " >/dev/null 2>&1
 
     if [ "$LOG_LEVEL" -eq 0 ]; then
-        echo "reset_db completed."
+        echo "reset_table completed."
     else
-        echo "reset_db completed. All entries cleared from leases table."
+        echo "reset_table completed. All entries cleared from leases table."
+    fi
+}
+
+delete_table() {
+    echo "WARNING: This operation will completely delete the leases table from the database."
+    echo "All data will be lost, and the table will need to be recreated before using this tool again."
+    echo "Additionally, this operation will NOT remove any entries in DDNS."
+    echo "Any active entries in the leases table will remain in DNS as static and must be cleaned manually."
+    echo "Running 'get_leases' again will mark all entries as pre-existing and unmanaged by this tool."
+    read -p "Are you sure you want to delete the leases table? (yes/no): " confirm
+
+    if [[ "$confirm" != "yes" ]]; then
+        echo "Operation cancelled."
+        return 1
+    fi
+
+    export PGPASSWORD="$(${VAULT_BIN} kv get -field=password secret/ipa/psql/ahv_admin)"
+    psql -U ahv_admin -h "$POSTGRES_HOST" -d "$AHV_IPAM_DB" -c "
+        DROP TABLE IF EXISTS leases;
+    " >/dev/null 2>&1
+
+    if [ "$LOG_LEVEL" -eq 0 ]; then
+        echo "delete_db completed. The leases table has been removed."
+    else
+        echo "delete_db completed. The leases table has been dropped from the database."
     fi
 }
 
@@ -566,7 +602,7 @@ reset_db() {
 #         -> If preexisting_dns='false', remove from DNS + DB
 #         -> If preexisting_dns='true', remove only from DB (DNS is not ours)
 ###############################################################################
-prune_db() {
+prune_leases() {
     # Check usage
     if [[ $# -lt 1 ]]; then
         echo "Usage:"
@@ -986,11 +1022,14 @@ case "$1" in
     show_hostnames)
         show_hostnames
         ;;
-    reset_db)
-        reset_db
+    reset_table)
+        reset_table
         ;;
-    prune_db)
-        prune_db  "${@:2}"
+    delete_table)
+        delete_table
+        ;;
+    prune_leases)
+        prune_leases  "${@:2}"
         ;;
     *)
         usage

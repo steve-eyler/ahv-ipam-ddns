@@ -4,10 +4,12 @@ _ahv_ipam_ddns_completions() {
     local cur opts
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    opts="create_db reset_db prune_db save_credentials get_leases show_leases cleanup_leases update_ddns setup_cron show_hostnames"
+    opts="save_credentials create_db delete_table reset_table get_leases show_leases cleanup_leases prune_leases update_ddns setup_cron show_hostnames"
 
     # Generate autocomplete options for the current word
     COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
 }
-complete -F _ahv_ipam_ddns_completions ahv_ipam_ddns.sh
 
+# Add autocomplete for both 'ahv_ipam_ddns.sh' and './ahv_ipam_ddns.sh'
+complete -F _ahv_ipam_ddns_completions ahv_ipam_ddns.sh
+complete -F _ahv_ipam_ddns_completions ./ahv_ipam_ddns.sh
